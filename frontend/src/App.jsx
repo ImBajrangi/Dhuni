@@ -496,30 +496,33 @@ function App() {
       noiseSource.loop = true;
 
       const noiseGain = ctx.createGain();
-      noiseGain.gain.value = isPreviewPlaying ? 0.5 * (tapeHiss / 200) * 0.95 : 0; // Matches FFmpeg's amix noise scaling (0.5 * amplitude * limiter ceiling)
+      noiseGain.gain.value = isPreviewPlaying ? (tapeHiss / 200) : 0;
 
-      // 6. Dynamics Compressor (Acts as master brickwall peak limiter matching FFmpeg's alimiter)
-      const compressor = ctx.createDynamicsCompressor();
-      compressor.threshold.value = -0.5; // dB threshold
-      compressor.knee.value = 0.0; // Hard knee
-      compressor.ratio.value = 20.0; // Brickwall limiting ratio
-      compressor.attack.value = 0.003; // 3ms attack
-      compressor.release.value = 0.08; // 80ms release (avoids bass distortion while preventing volume squashing)
+      // 6. Peak Limiter (WaveShaperNode hard clipper — matches FFmpeg alimiter=limit=0.95 exactly)
+      // Unlike DynamicsCompressor (RMS-based, squashes sustained energy), this only clips
+      // individual peaks exceeding ±0.95 — preserving full dynamics and tonal body.
+      const limiterNode = ctx.createWaveShaper();
+      const limCurveLen = 8192;
+      const limCurve = new Float32Array(limCurveLen);
+      for (let i = 0; i < limCurveLen; i++) {
+        const x = (i * 2) / limCurveLen - 1;
+        limCurve[i] = Math.max(-0.95, Math.min(0.95, x));
+      }
+      limiterNode.curve = limCurve;
+      limiterNode.oversample = '4x'; // Anti-aliasing for clipped transients
 
-      // Level-matching gains (FFmpeg amix scales by 0.5, we apply 1.9x makeup gain post-limit)
+      // Pass-through gains (no amix scaling needed — clipper handles peak limiting transparently)
       const amixMusicGain = ctx.createGain();
-      amixMusicGain.gain.value = 0.5;
+      amixMusicGain.gain.value = 1.0;
 
       const makeupGain = ctx.createGain();
-      makeupGain.gain.value = 1.9;
+      makeupGain.gain.value = 1.0;
 
-      // Master output summing gain (merges limited audio and tape hiss)
       const finalGain = ctx.createGain();
       finalGain.gain.value = 1.0;
 
       noiseSource.connect(noiseGain);
-      // Connect noise directly to compressor to sum and limit it with the music
-      noiseGain.connect(compressor);
+      noiseGain.connect(limiterNode);
       noiseSource.start(0);
 
       // 7. Preview Analyser (for canvas visualizer)
@@ -676,12 +679,11 @@ function App() {
       g3.connect(merger, 0, 1);
       g4.connect(merger, 0, 1);
 
-      // Scale music output by 0.5 (amix level reduction)
+      // Route through peak limiter (hard clipper at ±0.95 — matches FFmpeg alimiter)
       merger.connect(amixMusicGain);
-      amixMusicGain.connect(compressor);
+      amixMusicGain.connect(limiterNode);
 
-      // Limit and boost back up using makeupGain
-      compressor.connect(makeupGain);
+      limiterNode.connect(makeupGain);
       makeupGain.connect(analyser);
 
       // Analyser goes to finalGain, then to destination
@@ -882,7 +884,7 @@ function App() {
   useEffect(() => {
     if (noiseGainRef.current && audioContextRef.current) {
       const ctx = audioContextRef.current;
-      const targetGain = isPreviewPlaying ? (tapeHiss / 200) * 0.95 : 0;
+      const targetGain = isPreviewPlaying ? (tapeHiss / 200) : 0;
       noiseGainRef.current.gain.setTargetAtTime(targetGain, ctx.currentTime, 0.05);
     }
   }, [tapeHiss, isPreviewPlaying]);
