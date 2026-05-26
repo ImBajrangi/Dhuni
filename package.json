@@ -23,19 +23,25 @@
   "build": {
     "appId": "com.lofiwavestudio.app",
     "productName": "LofiWaveStudio",
+    "directories": {
+      "buildResources": "electron"
+    },
     "files": [
       "electron/**/*",
       "backend/**/*",
       "frontend/dist/**/*"
     ],
     "mac": {
-      "category": "public.app-category.music"
+      "category": "public.app-category.music",
+      "icon": "electron/icon.png"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "electron/icon.png"
     },
     "linux": {
-      "target": "AppImage"
+      "target": "AppImage",
+      "icon": "electron/icon.png"
     }
   }
 }
