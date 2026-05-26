@@ -14,7 +14,10 @@ import {
   Loader2, 
   Sparkles, 
   History,
-  Trash2
+  Trash2,
+  Save,
+  Plus,
+  X
 } from 'lucide-react';
 
 const BACKEND_URL = 'http://localhost:3001';
@@ -142,6 +145,21 @@ function App() {
   // History States
   const [history, setHistory] = useState([]);
 
+  // Custom Templates & Bulk Mode States
+  const [customTemplates, setCustomTemplates] = useState(() => {
+    try {
+      const saved = localStorage.getItem('lofi_templates');
+      return saved ? JSON.parse(saved) : {};
+    } catch (e) {
+      return {};
+    }
+  });
+  const [bulkMode, setBulkMode] = useState(false);
+  const [bulkQueue, setBulkQueue] = useState([]);
+  const [isProcessingBulk, setIsProcessingBulk] = useState(false);
+  const [bulkYtText, setBulkYtText] = useState('');
+  const [bulkSourceType, setBulkSourceType] = useState('youtube'); // 'youtube' | 'upload'
+
   // DOM and Audio Web API Refs
   const audioRef = useRef(null);
   const previewAudioRef = useRef(null);
@@ -240,6 +258,314 @@ function App() {
     });
     setTrimStart(0);
     setTrimEnd(65);
+  };
+
+  // Custom Template Management
+  const handleSaveTemplate = () => {
+    const name = prompt("Enter a name for your custom template:");
+    if (!name || !name.trim()) return;
+    const key = `custom_${Date.now()}`;
+    const newTemplates = {
+      ...customTemplates,
+      [key]: {
+        name: name.trim(),
+        speed,
+        pitchStyle,
+        pitchSemitones,
+        reverb,
+        bassEQ,
+        midEQ,
+        trebleEQ,
+        tapeHiss,
+        muffleCutoff,
+        stereoWidth,
+        wowFlutter,
+        bitDepth
+      }
+    };
+    setCustomTemplates(newTemplates);
+    localStorage.setItem('lofi_templates', JSON.stringify(newTemplates));
+  };
+
+  const applyCustomTemplate = (key) => {
+    const t = customTemplates[key];
+    if (!t) return;
+    setSpeed(t.speed);
+    setPitchStyle(t.pitchStyle);
+    setPitchSemitones(t.pitchSemitones);
+    setReverb(t.reverb);
+    setBassEQ(t.bassEQ);
+    setMidEQ(t.midEQ);
+    setTrebleEQ(t.trebleEQ);
+    setTapeHiss(t.tapeHiss);
+    setMuffleCutoff(t.muffleCutoff);
+    if (t.stereoWidth !== undefined) setStereoWidth(t.stereoWidth);
+    if (t.wowFlutter !== undefined) setWowFlutter(t.wowFlutter);
+    if (t.bitDepth !== undefined) setBitDepth(t.bitDepth);
+    setActivePreset(null);
+  };
+
+  const deleteCustomTemplate = (key, e) => {
+    e.stopPropagation();
+    const newTemplates = { ...customTemplates };
+    delete newTemplates[key];
+    setCustomTemplates(newTemplates);
+    localStorage.setItem('lofi_templates', JSON.stringify(newTemplates));
+  };
+
+  // Bulk Mode Helpers & Workers
+  const addYtLinksToQueue = async (linksText) => {
+    const lines = linksText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length === 0) return;
+    
+    setErrorMessage('');
+    
+    // Add temp items first with loading state
+    const tempItems = lines.map((link, idx) => {
+      const tempId = `yt_temp_${Date.now()}_${idx}`;
+      return {
+        id: tempId,
+        title: `Fetching metadata for ${link.substring(0, 30)}${link.length > 30 ? '...' : ''}`,
+        url: link,
+        isLocal: false,
+        status: 'fetching',
+        progress: 0,
+        error: null,
+        outputFile: null
+      };
+    });
+    
+    setBulkQueue(prev => [...prev, ...tempItems]);
+    setBulkYtText('');
+
+    // Now fetch metadata for each link in background
+    for (const item of tempItems) {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/fetch-info`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: item.url })
+        });
+        const data = await res.json();
+        
+        if (res.ok) {
+          setBulkQueue(prev => prev.map(q => q.id === item.id ? {
+            ...q,
+            id: data.id,
+            title: data.title,
+            duration: data.duration,
+            thumbnail: data.thumbnail,
+            status: 'queued'
+          } : q));
+        } else {
+          setBulkQueue(prev => prev.map(q => q.id === item.id ? {
+            ...q,
+            title: `Error: ${item.url}`,
+            status: 'failed',
+            error: data.error || 'Failed to fetch video info.'
+          } : q));
+        }
+      } catch (err) {
+        setBulkQueue(prev => prev.map(q => q.id === item.id ? {
+          ...q,
+          title: `Error: ${item.url}`,
+          status: 'failed',
+          error: 'Connection error fetching info.'
+        } : q));
+      }
+    }
+  };
+
+  const handleBulkFileUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    setErrorMessage('');
+
+    // Pre-queue them as uploading
+    const tempItems = files.map((file, idx) => {
+      const tempId = `upload_temp_${Date.now()}_${idx}`;
+      return {
+        id: tempId,
+        title: `Uploading ${file.name}...`,
+        isLocal: true,
+        status: 'uploading',
+        progress: 0,
+        error: null,
+        outputFile: null
+      };
+    });
+
+    setBulkQueue(prev => [...prev, ...tempItems]);
+
+    // Upload files sequentially
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const tempItem = tempItems[i];
+      
+      const formData = new FormData();
+      formData.append('file', file);
+
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${BACKEND_URL}/api/upload`, true);
+
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) {
+            const pct = Math.round((event.loaded / event.total) * 100);
+            setBulkQueue(prev => prev.map(q => q.id === tempItem.id ? { ...q, progress: pct } : q));
+          }
+        };
+
+        const uploadPromise = new Promise((resolve) => {
+          xhr.onload = () => {
+            if (xhr.status === 200) {
+              const data = JSON.parse(xhr.responseText);
+              setBulkQueue(prev => prev.map(q => q.id === tempItem.id ? {
+                ...q,
+                id: data.file,
+                title: data.title,
+                duration: data.duration,
+                status: 'queued',
+                progress: 0
+              } : q));
+              resolve(true);
+            } else {
+              setBulkQueue(prev => prev.map(q => q.id === tempItem.id ? {
+                ...q,
+                status: 'failed',
+                error: 'Upload failed.'
+              } : q));
+              resolve(false);
+            }
+          };
+
+          xhr.onerror = () => {
+            setBulkQueue(prev => prev.map(q => q.id === tempItem.id ? {
+              ...q,
+              status: 'failed',
+              error: 'Upload connection error.'
+            } : q));
+            resolve(false);
+          };
+
+          xhr.send(formData);
+        });
+
+        await uploadPromise;
+      } catch (err) {
+        setBulkQueue(prev => prev.map(q => q.id === tempItem.id ? {
+          ...q,
+          status: 'failed',
+          error: 'Process upload error.'
+        } : q));
+      }
+    }
+  };
+
+  const handleStartBulkProcess = async () => {
+    const queuedItems = bulkQueue.filter(item => item.status === 'queued' || item.status === 'failed');
+    if (queuedItems.length === 0) return;
+
+    setIsProcessingBulk(true);
+    setErrorMessage('');
+
+    // Iterate through items
+    for (const item of queuedItems) {
+      setBulkQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'downloading', progress: 0 } : q));
+
+      try {
+        let sourceFile = item.id;
+
+        const listenToBulkProgress = (taskId, type) => {
+          return new Promise((resolve, reject) => {
+            const es = new EventSource(`${BACKEND_URL}/api/progress/${taskId}`);
+            es.onmessage = (event) => {
+              const data = JSON.parse(event.data);
+              if (data.status === 'downloading' && type === 'downloading') {
+                setBulkQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: Math.round(data.progress) } : q));
+              } else if (data.status === 'processing' && type === 'processing') {
+                setBulkQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: Math.round(data.progress) } : q));
+              } else if (data.status === 'completed') {
+                es.close();
+                if (type === 'processing') {
+                  setBulkQueue(prev => prev.map(q => q.id === item.id ? {
+                    ...q,
+                    status: 'completed',
+                    progress: 100,
+                    outputFile: data.file
+                  } : q));
+                } else {
+                  setBulkQueue(prev => prev.map(q => q.id === item.id ? { ...q, progress: 100 } : q));
+                }
+                resolve(data.file);
+              } else if (data.status === 'failed') {
+                es.close();
+                reject(new Error(data.error || 'Server task failed.'));
+              }
+            };
+            es.onerror = () => {
+              es.close();
+              reject(new Error('Progress event link lost.'));
+            };
+          });
+        };
+
+        if (!item.isLocal) {
+          // 1. Download
+          const dlRes = await fetch(`${BACKEND_URL}/api/download`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: item.url, id: item.id })
+          });
+          const dlData = await dlRes.json();
+          if (!dlRes.ok) throw new Error(dlData.error || 'Failed to download.');
+
+          await listenToBulkProgress(dlData.taskId, 'downloading');
+          sourceFile = `${item.id}.mp3`;
+        }
+
+        // 2. Process
+        setBulkQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'processing', progress: 0 } : q));
+
+        const procRes = await fetch(`${BACKEND_URL}/api/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sourceFile,
+            title: item.title,
+            speed,
+            pitchStyle,
+            pitchSemitones: pitchStyle === 'vinyl' ? Math.round(12 * Math.log2(speed)) : pitchSemitones,
+            reverb,
+            bassEQ,
+            midEQ,
+            trebleEQ,
+            tapeHiss: tapeHiss / 200,
+            muffleCutoff,
+            stereoWidth,
+            wowFlutter,
+            bitDepth,
+            exportFormat
+          })
+        });
+        const procData = await procRes.json();
+        if (!procRes.ok) throw new Error(procData.error || 'Process failed.');
+
+        await listenToBulkProgress(procData.taskId, 'processing');
+
+      } catch (err) {
+        setBulkQueue(prev => prev.map(q => q.id === item.id ? {
+          ...q,
+          status: 'failed',
+          progress: 0,
+          error: err.message || 'Processing failed.'
+        } : q));
+      }
+    }
+
+    setIsProcessingBulk(false);
+    fetchHistory();
   };
 
   const handleDeleteHistoryItem = async (id) => {
@@ -1722,130 +2048,436 @@ function App() {
           
           {/* Deck 1: Source Loader */}
           <section className="glass-panel" style={{ padding: '24px' }}>
-            <div className="panel-header">
-              <h2 className="panel-title">
-                <Youtube style={{ color: 'var(--accent-cyan)' }} />
-                Audio Source Loader
-              </h2>
+            <div className="panel-header" style={{ marginBottom: '16px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <h2 className="panel-title" style={{ margin: 0 }}>
+                  <Youtube style={{ color: 'var(--accent-cyan)' }} />
+                  Lofi Engine Mode
+                </h2>
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Choose single track editing or bulk rendering queue</p>
+              </div>
               
-              {/* Tab Toggles */}
-              <div style={{ display: 'flex', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
+              {/* Mode Selector */}
+              <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: '3px', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                 <button 
-                  onClick={() => { setSourceType('youtube'); setVideoInfo(null); }}
-                  className="btn-secondary"
+                  onClick={() => setBulkMode(false)}
                   style={{ 
                     padding: '6px 12px', 
-                    fontSize: '0.85rem', 
+                    fontSize: '0.8rem', 
                     border: 'none', 
                     borderRadius: '6px',
-                    background: sourceType === 'youtube' ? 'rgba(6, 182, 212, 0.2)' : 'transparent',
-                    color: sourceType === 'youtube' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-                    fontWeight: 600
+                    background: !bulkMode ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
+                    color: !bulkMode ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease'
                   }}
                 >
-                  YouTube Link
+                  🎵 Single Track
                 </button>
                 <button 
-                  onClick={() => { setSourceType('upload'); setVideoInfo(null); }}
-                  className="btn-secondary"
+                  onClick={() => { setBulkMode(true); setVideoInfo(null); }}
                   style={{ 
                     padding: '6px 12px', 
-                    fontSize: '0.85rem', 
+                    fontSize: '0.8rem', 
                     border: 'none', 
                     borderRadius: '6px',
-                    background: sourceType === 'upload' ? 'rgba(139, 92, 246, 0.2)' : 'transparent',
-                    color: sourceType === 'upload' ? 'var(--accent-purple)' : 'var(--text-secondary)',
-                    fontWeight: 600
+                    background: bulkMode ? 'rgba(139, 92, 246, 0.25)' : 'transparent',
+                    color: bulkMode ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    transition: 'all 0.2s ease'
                   }}
                 >
-                  Local Upload
+                  📦 Bulk Queue
                 </button>
               </div>
             </div>
 
-            {/* Quick Demo Track Loader Option */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '-8px', marginBottom: '16px' }}>
-              <button
-                onClick={handleLoadDemoTrack}
-                className="btn-secondary"
-                style={{ 
-                  padding: '6px 12px', 
-                  fontSize: '0.8rem', 
-                  borderRadius: '8px',
-                  borderColor: 'var(--accent-pink)',
-                  color: 'var(--accent-pink)',
-                  background: 'rgba(236, 72, 153, 0.05)',
-                  fontWeight: 600,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px'
-                }}
-              >
-                <Sparkles style={{ width: '12px', height: '12px' }} />
-                Try a Demo Track
-              </button>
-            </div>
-
-            {sourceType === 'youtube' ? (
+            {bulkMode ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div style={{ display: 'flex', gap: '12px' }}>
-                  <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
-                    <input 
-                      type="text" 
-                      placeholder="Paste YouTube video or audio link..."
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                    />
-                  </div>
+                {/* Bulk Source Switcher */}
+                <div style={{ display: 'flex', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-color)', width: 'fit-content' }}>
                   <button 
-                    className="btn-primary" 
-                    onClick={handleFetchInfo}
-                    disabled={isFetchingInfo || !url}
-                    style={{ minWidth: '130px' }}
+                    onClick={() => setBulkSourceType('youtube')}
+                    style={{ 
+                      padding: '6px 12px', 
+                      fontSize: '0.8rem', 
+                      border: 'none', 
+                      borderRadius: '6px',
+                      background: bulkSourceType === 'youtube' ? 'rgba(6, 182, 212, 0.2)' : 'transparent',
+                      color: bulkSourceType === 'youtube' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
                   >
-                    {isFetchingInfo ? (
-                      <>
-                        <Loader2 className="animate-spin-custom" style={{ width: '18px', height: '18px' }} />
-                        Analyzing...
-                      </>
-                    ) : 'Fetch Video'}
+                    YouTube Links
+                  </button>
+                  <button 
+                    onClick={() => setBulkSourceType('upload')}
+                    style={{ 
+                      padding: '6px 12px', 
+                      fontSize: '0.8rem', 
+                      border: 'none', 
+                      borderRadius: '6px',
+                      background: bulkSourceType === 'upload' ? 'rgba(139, 92, 246, 0.2)' : 'transparent',
+                      color: bulkSourceType === 'upload' ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Local Files
                   </button>
                 </div>
+
+                {bulkSourceType === 'youtube' ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    <textarea
+                      placeholder="Paste YouTube links here (One link per line)..."
+                      value={bulkYtText}
+                      onChange={(e) => setBulkYtText(e.target.value)}
+                      style={{
+                        width: '100%',
+                        height: '90px',
+                        background: 'rgba(0,0,0,0.3)',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: '8px',
+                        padding: '10px',
+                        color: '#ffffff',
+                        fontSize: '0.85rem',
+                        fontFamily: 'monospace',
+                        resize: 'vertical'
+                      }}
+                    />
+                    <button
+                      onClick={() => addYtLinksToQueue(bulkYtText)}
+                      disabled={!bulkYtText.trim()}
+                      className="btn-primary"
+                      style={{
+                        alignSelf: 'flex-start',
+                        padding: '8px 16px',
+                        fontSize: '0.85rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px'
+                      }}
+                    >
+                      <Plus style={{ width: '14px', height: '14px' }} />
+                      Add to Bulk Queue
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    <div 
+                      onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                      style={{
+                        border: '2px dashed var(--border-color)',
+                        borderRadius: '12px',
+                        padding: '24px',
+                        textAlign: 'center',
+                        cursor: 'pointer',
+                        background: 'rgba(0,0,0,0.15)',
+                        transition: 'all 0.25s ease'
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-purple)'}
+                      onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                    >
+                      <UploadCloud style={{ width: '36px', height: '36px', color: 'var(--text-secondary)', margin: '0 auto 8px' }} />
+                      <p style={{ fontWeight: 600, fontSize: '0.85rem', color: 'var(--text-primary)' }}>
+                        Click to select multiple local audio/video files
+                      </p>
+                      <input 
+                        ref={fileInputRef}
+                        type="file" 
+                        accept="audio/*,video/*" 
+                        multiple={true}
+                        onChange={handleBulkFileUpload} 
+                        style={{ display: 'none' }} 
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Bulk Queue List */}
+                {bulkQueue.length > 0 && (
+                  <div style={{ marginTop: '16px', background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                      <span style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        Queue ({bulkQueue.length} Tracks)
+                      </span>
+                      <button
+                        onClick={() => setBulkQueue([])}
+                        disabled={isProcessingBulk}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--text-muted)',
+                          fontSize: '0.75rem',
+                          cursor: 'pointer',
+                          textDecoration: 'underline'
+                        }}
+                      >
+                        Clear All
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '240px', overflowY: 'auto', paddingRight: '4px' }}>
+                      {bulkQueue.map((item, index) => (
+                        <div 
+                          key={item.id + '_' + index}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            background: 'rgba(255,255,255,0.02)',
+                            padding: '10px 12px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(255,255,255,0.05)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, minWidth: 0 }}>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#ffffff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {item.title}
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <span style={{
+                                fontSize: '0.7rem',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                fontWeight: 600,
+                                textTransform: 'uppercase',
+                                background: 
+                                  item.status === 'completed' ? 'rgba(34,197,94,0.15)' :
+                                  item.status === 'failed' ? 'rgba(239,68,68,0.15)' :
+                                  item.status === 'queued' ? 'rgba(255,255,255,0.05)' :
+                                  item.status === 'fetching' ? 'rgba(236,72,153,0.15)' :
+                                  'rgba(6,182,212,0.15)',
+                                color:
+                                  item.status === 'completed' ? '#22c55e' :
+                                  item.status === 'failed' ? '#ef4444' :
+                                  item.status === 'queued' ? 'var(--text-muted)' :
+                                  item.status === 'fetching' ? 'var(--accent-pink)' :
+                                  'var(--accent-cyan)'
+                              }}>
+                                {item.status}
+                              </span>
+                              {item.error && (
+                                <span style={{ fontSize: '0.7rem', color: '#ef4444' }}>
+                                  ({item.error})
+                                </span>
+                              )}
+                            </div>
+                            
+                            {/* Individual Item Progress */}
+                            {(item.status === 'downloading' || item.status === 'processing' || item.status === 'uploading' || item.status === 'fetching') && (
+                              <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden', marginTop: '6px' }}>
+                                <div style={{ width: `${item.progress || 0}%`, height: '100%', background: 'var(--accent-cyan)', transition: 'width 0.1s ease' }}></div>
+                              </div>
+                            )}
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '12px' }}>
+                            {item.status === 'completed' && item.outputFile && (
+                              <a
+                                href={`${BACKEND_URL}/media/${item.outputFile}`}
+                                download={item.title + '.mp3'}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  width: '28px',
+                                  height: '28px',
+                                  borderRadius: '6px',
+                                  background: 'rgba(34,197,94,0.2)',
+                                  color: '#22c55e',
+                                  border: 'none',
+                                  cursor: 'pointer'
+                                }}
+                              >
+                                <Download style={{ width: '14px', height: '14px' }} />
+                              </a>
+                            )}
+                            <button
+                              onClick={() => setBulkQueue(prev => prev.filter((_, idx) => idx !== index))}
+                              disabled={isProcessingBulk}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: '28px',
+                                height: '28px',
+                                borderRadius: '6px',
+                                background: 'rgba(239,68,68,0.1)',
+                                color: '#ef4444',
+                                border: 'none',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <Trash2 style={{ width: '14px', height: '14px' }} />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                        ⚠️ Notice: Active effects & presets on the right will be baked into each queued audio.
+                      </p>
+                      <button
+                        onClick={handleStartBulkProcess}
+                        disabled={isProcessingBulk || bulkQueue.filter(q => q.status === 'queued' || q.status === 'failed').length === 0}
+                        className="btn-primary"
+                        style={{
+                          width: '100%',
+                          padding: '12px',
+                          fontWeight: 700,
+                          fontSize: '0.95rem',
+                          background: 'linear-gradient(135deg, var(--accent-pink) 0%, var(--accent-purple) 100%)',
+                          boxShadow: '0 4px 15px rgba(236,72,153,0.3)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '8px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        {isProcessingBulk ? (
+                          <>
+                            <Loader2 className="spinning" style={{ width: '18px', height: '18px' }} />
+                            Baking Batch slowed & reverb...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles style={{ width: '18px', height: '18px' }} />
+                            Process {bulkQueue.filter(q => q.status === 'queued' || q.status === 'failed').length} Tracks in Bulk
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div 
-                  onClick={() => fileInputRef.current?.click()}
-                  style={{
-                    border: '2px dashed var(--border-color)',
-                    borderRadius: '12px',
-                    padding: '30px',
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    background: 'rgba(0,0,0,0.15)',
-                    transition: 'all 0.3s ease'
-                  }}
-                  onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-purple)'}
-                  onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
-                >
-                  <UploadCloud style={{ width: '40px', height: '40px', color: 'var(--text-secondary)', margin: '0 auto 12px' }} />
-                  <p style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                    {isUploading ? `Uploading file (${uploadProgress}%)` : 'Drag and drop or click to upload file'}
-                  </p>
-                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '5px' }}>
-                    Supports MP3, WAV, FLAC, MP4, MKV (Audio extracted automatically)
-                  </p>
-                  <input 
-                    ref={fileInputRef}
-                    type="file" 
-                    accept="audio/*,video/*" 
-                    onChange={handleFileUpload} 
-                    style={{ display: 'none' }} 
-                  />
+                <div style={{ display: 'flex', background: 'rgba(0,0,0,0.2)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-color)', width: 'fit-content' }}>
+                  <button 
+                    onClick={() => { setSourceType('youtube'); setVideoInfo(null); }}
+                    className="btn-secondary"
+                    style={{ 
+                      padding: '6px 12px', 
+                      fontSize: '0.85rem', 
+                      border: 'none', 
+                      borderRadius: '6px',
+                      background: sourceType === 'youtube' ? 'rgba(6, 182, 212, 0.2)' : 'transparent',
+                      color: sourceType === 'youtube' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                      fontWeight: 600
+                    }}
+                  >
+                    YouTube Link
+                  </button>
+                  <button 
+                    onClick={() => { setSourceType('upload'); setVideoInfo(null); }}
+                    className="btn-secondary"
+                    style={{ 
+                      padding: '6px 12px', 
+                      fontSize: '0.85rem', 
+                      border: 'none', 
+                      borderRadius: '6px',
+                      background: sourceType === 'upload' ? 'rgba(139, 92, 246, 0.2)' : 'transparent',
+                      color: sourceType === 'upload' ? 'var(--accent-purple)' : 'var(--text-secondary)',
+                      fontWeight: 600
+                    }}
+                  >
+                    Local Upload
+                  </button>
                 </div>
-                {isUploading && (
-                  <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
-                    <div style={{ width: `${uploadProgress}%`, height: '100%', background: 'var(--accent-purple)', transition: 'width 0.1s ease' }}></div>
+
+                {/* Quick Demo Track Loader Option */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '4px', marginBottom: '4px' }}>
+                  <button
+                    onClick={handleLoadDemoTrack}
+                    className="btn-secondary"
+                    style={{ 
+                      padding: '6px 12px', 
+                      fontSize: '0.8rem', 
+                      borderRadius: '8px',
+                      borderColor: 'var(--accent-pink)',
+                      color: 'var(--accent-pink)',
+                      background: 'rgba(236, 72, 153, 0.05)',
+                      fontWeight: 600,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px'
+                    }}
+                  >
+                    <Sparkles style={{ width: '12px', height: '12px' }} />
+                    Try a Demo Track
+                  </button>
+                </div>
+
+                {sourceType === 'youtube' ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div style={{ display: 'flex', gap: '12px' }}>
+                      <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+                        <input 
+                          type="text" 
+                          placeholder="Paste YouTube video or audio link..."
+                          value={url}
+                          onChange={(e) => setUrl(e.target.value)}
+                        />
+                      </div>
+                      <button 
+                        className="btn-primary" 
+                        onClick={handleFetchInfo}
+                        disabled={isFetchingInfo || !url}
+                        style={{ minWidth: '130px' }}
+                      >
+                        {isFetchingInfo ? (
+                          <>
+                            <Loader2 className="animate-spin-custom" style={{ width: '18px', height: '18px' }} />
+                            Analyzing...
+                          </>
+                        ) : 'Fetch Video'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    <div 
+                      onClick={() => fileInputRef.current?.click()}
+                      style={{
+                        border: '2px dashed var(--border-color)',
+                        borderRadius: '12px',
+                        padding: '30px',
+                        textAlign: 'center',
+                        cursor: 'pointer',
+                        background: 'rgba(0,0,0,0.15)',
+                        transition: 'all 0.3s ease'
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--accent-purple)'}
+                      onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--border-color)'}
+                    >
+                      <UploadCloud style={{ width: '40px', height: '40px', color: 'var(--text-secondary)', margin: '0 auto 12px' }} />
+                      <p style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
+                        {isUploading ? `Uploading file (${uploadProgress}%)` : 'Drag and drop or click to upload file'}
+                      </p>
+                      <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '5px' }}>
+                        Supports MP3, WAV, FLAC, MP4, MKV (Audio extracted automatically)
+                      </p>
+                      <input 
+                        ref={fileInputRef}
+                        type="file" 
+                        accept="audio/*,video/*" 
+                        onChange={handleFileUpload} 
+                        style={{ display: 'none' }} 
+                      />
+                    </div>
+                    {isUploading && (
+                      <div style={{ width: '100%', height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px', overflow: 'hidden' }}>
+                        <div style={{ width: `${uploadProgress}%`, height: '100%', background: 'var(--accent-purple)', transition: 'width 0.1s ease' }}></div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -2137,7 +2769,7 @@ function App() {
                 <button 
                   onClick={handleResetSettings} 
                   className="btn-secondary"
-                  disabled={!videoInfo || isPreviewLoading}
+                  disabled={(!videoInfo && !bulkMode) || isPreviewLoading}
                   style={{ padding: '6px 12px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '6px' }}
                 >
                   <RotateCcw style={{ width: '12px', height: '12px' }} />
@@ -2146,7 +2778,7 @@ function App() {
               </div>
             </div>
 
-            {videoInfo ? (
+            {(videoInfo || bulkMode) ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
                 
                 {/* Aesthetic Presets Selection */}
@@ -2188,58 +2820,146 @@ function App() {
                   </div>
                 </div>
 
-                <hr style={{ border: 'none', borderBottom: '1px solid var(--border-color)' }} />
-
-                {/* Visual Audio Trimmer Slider */}
-                <div>
-                  <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
-                    <span>Audio Trimmer Range</span>
-                    <span style={{ color: 'var(--accent-cyan)' }}>
-                      {formatTime(trimStart)} - {formatTime(trimEnd)} ({formatTime(trimEnd - trimStart)})
+                {/* My Custom Templates */}
+                <div style={{ marginTop: '16px', background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Save style={{ width: '14px', height: '14px', color: 'var(--accent-pink)' }} />
+                      My Custom Templates
                     </span>
-                  </label>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '10px' }}>
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Start Time</span>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>{formatTime(trimStart)}</span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="0" 
-                        max={Math.round(videoInfo.duration)} 
-                        value={trimStart} 
-                        disabled={isPreviewPlaying}
-                        onChange={(e) => {
-                          const val = Math.min(parseInt(e.target.value), trimEnd - 1);
-                          setTrimStart(val || 0);
-                        }} 
-                      />
-                    </div>
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>End Time</span>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>{formatTime(trimEnd)}</span>
-                      </div>
-                      <input 
-                        type="range" 
-                        min="0" 
-                        max={Math.round(videoInfo.duration)} 
-                        value={trimEnd} 
-                        disabled={isPreviewPlaying}
-                        onChange={(e) => {
-                          const val = Math.max(parseInt(e.target.value), trimStart + 1);
-                          setTrimEnd(val || 1);
-                        }} 
-                      />
-                    </div>
+                    <button
+                      onClick={handleSaveTemplate}
+                      style={{
+                        padding: '4px 10px',
+                        background: 'rgba(236, 72, 153, 0.1)',
+                        border: '1px solid var(--accent-pink)',
+                        color: 'var(--accent-pink)',
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px',
+                        transition: 'all 0.2s ease'
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--accent-pink)'; e.currentTarget.style.color = '#ffffff'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(236, 72, 153, 0.1)'; e.currentTarget.style.color = 'var(--accent-pink)'; }}
+                    >
+                      <Plus style={{ width: '12px', height: '12px' }} />
+                      Save Current
+                    </button>
                   </div>
-                  {isPreviewPlaying && (
-                    <p style={{ fontSize: '0.75rem', color: 'var(--accent-pink)', marginTop: '4px' }}>
-                      * Mute Live Preview to adjust the trim window.
+
+                  {Object.keys(customTemplates).length === 0 ? (
+                    <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textAlign: 'center', margin: '8px 0' }}>
+                      No custom templates saved yet. Set sliders and click "Save Current" to create one!
                     </p>
+                  ) : (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                      {Object.keys(customTemplates).map((key) => {
+                        const t = customTemplates[key];
+                        return (
+                          <div
+                            key={key}
+                            onClick={() => applyCustomTemplate(key)}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              padding: '6px 10px',
+                              background: 'rgba(0,0,0,0.3)',
+                              border: '1px solid var(--border-color)',
+                              borderRadius: '8px',
+                              cursor: 'pointer',
+                              fontSize: '0.75rem',
+                              color: 'var(--text-primary)',
+                              fontWeight: 500,
+                              transition: 'all 0.2s ease'
+                            }}
+                            onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--accent-pink)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--border-color)'; }}
+                          >
+                            <span>{t.name}</span>
+                            <button
+                              onClick={(e) => deleteCustomTemplate(key, e)}
+                              style={{
+                                border: 'none',
+                                background: 'transparent',
+                                cursor: 'pointer',
+                                padding: 0,
+                                display: 'flex',
+                                alignItems: 'center',
+                                color: 'var(--text-muted)'
+                              }}
+                              onMouseEnter={(e) => { e.currentTarget.style.color = '#ef4444'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                            >
+                              <X style={{ width: '12px', height: '12px', pointerEvents: 'none' }} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
+
+                {videoInfo && (
+                  <>
+                    <hr style={{ border: 'none', borderBottom: '1px solid var(--border-color)' }} />
+
+                    {/* Visual Audio Trimmer Slider */}
+                    <div>
+                      <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                        <span>Audio Trimmer Range</span>
+                        <span style={{ color: 'var(--accent-cyan)' }}>
+                          {formatTime(trimStart)} - {formatTime(trimEnd)} ({formatTime(trimEnd - trimStart)})
+                        </span>
+                      </label>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '10px' }}>
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Start Time</span>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>{formatTime(trimStart)}</span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="0" 
+                            max={Math.round(videoInfo.duration)} 
+                            value={trimStart} 
+                            disabled={isPreviewPlaying}
+                            onChange={(e) => {
+                              const val = Math.min(parseInt(e.target.value), trimEnd - 1);
+                              setTrimStart(val || 0);
+                            }} 
+                          />
+                        </div>
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>End Time</span>
+                            <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>{formatTime(trimEnd)}</span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="0" 
+                            max={Math.round(videoInfo.duration)} 
+                            value={trimEnd} 
+                            disabled={isPreviewPlaying}
+                            onChange={(e) => {
+                              const val = Math.max(parseInt(e.target.value), trimStart + 1);
+                              setTrimEnd(val || 1);
+                            }} 
+                          />
+                        </div>
+                      </div>
+                      {isPreviewPlaying && (
+                        <p style={{ fontSize: '0.75rem', color: 'var(--accent-pink)', marginTop: '4px' }}>
+                          * Mute Live Preview to adjust the trim window.
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
 
                 <hr style={{ border: 'none', borderBottom: '1px solid var(--border-color)' }} />
 
@@ -2750,7 +3470,7 @@ function App() {
             ) : (
               <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)' }}>
                 <Sliders style={{ width: '32px', height: '32px', margin: '0 auto 12px', opacity: 0.5 }} />
-                <p style={{ fontSize: '0.9rem' }}>Please fetch a YouTube link or upload a file first to configure effects.</p>
+                <p style={{ fontSize: '0.9rem' }}>Please enter YouTube links or choose files in Bulk Queue, or load a Single Track first to configure effects.</p>
               </div>
             )}
           </section>
@@ -2811,32 +3531,89 @@ function App() {
               </div>
             </div>
 
-            {isProcessing ? (
-              <div style={{ padding: '10px 0' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '8px', color: 'var(--text-secondary)' }}>
-                  <span>{statusText}</span>
-                  <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{taskProgress}%</span>
+            {(() => {
+              const completed = bulkQueue.filter(q => q.status === 'completed').length;
+              const failed = bulkQueue.filter(q => q.status === 'failed').length;
+              const activeItem = bulkQueue.find(q => q.status === 'downloading' || q.status === 'processing');
+              const activeProgress = activeItem ? (activeItem.progress || 0) : 0;
+              const overallProgress = bulkQueue.length > 0 ? Math.min(100, Math.round(((completed + failed) / bulkQueue.length) * 100 + (activeProgress / bulkQueue.length))) : 0;
+              const queuedCount = bulkQueue.filter(q => q.status === 'queued' || q.status === 'failed').length;
+
+              if (bulkMode) {
+                return isProcessingBulk ? (
+                  <div style={{ padding: '10px 0', textAlign: 'left' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '8px', color: 'var(--text-secondary)' }}>
+                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '75%' }}>
+                        {activeItem 
+                          ? `Baking: ${activeItem.title}`
+                          : 'Preparing bulk tasks...'
+                        }
+                      </span>
+                      <span style={{ color: 'var(--accent-pink)', fontWeight: 600 }}>{overallProgress}%</span>
+                    </div>
+                    {/* Master Overall Progress Bar */}
+                    <div style={{ width: '100%', height: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '5px', overflow: 'hidden', marginBottom: '12px' }}>
+                      <div style={{ width: `${overallProgress}%`, height: '100%', background: 'linear-gradient(to right, var(--accent-pink), var(--accent-purple))', transition: 'width 0.2s ease' }}></div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Loader2 className="spinning" style={{ width: '14px', height: '14px', color: 'var(--accent-pink)' }} />
+                        Batch Conversion Active
+                      </span>
+                      <span>
+                        {completed + failed} / {bulkQueue.length} Completed
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <button 
+                    className="btn-primary"
+                    disabled={queuedCount === 0}
+                    onClick={handleStartBulkProcess}
+                    style={{ 
+                      width: '100%', 
+                      padding: '16px', 
+                      fontSize: '1.05rem', 
+                      textTransform: 'uppercase', 
+                      letterSpacing: '0.05em',
+                      background: 'linear-gradient(135deg, var(--accent-pink) 0%, var(--accent-purple) 100%)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <Sparkles style={{ width: '18px', height: '18px' }} />
+                    Bake {queuedCount} Queue Tracks
+                  </button>
+                );
+              }
+
+              // Original Single Track Render
+              return isProcessing ? (
+                <div style={{ padding: '10px 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', marginBottom: '8px', color: 'var(--text-secondary)' }}>
+                    <span>{statusText}</span>
+                    <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{taskProgress}%</span>
+                  </div>
+                  {/* Progress bar */}
+                  <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden', marginBottom: '12px' }}>
+                    <div style={{ width: `${taskProgress}%`, height: '100%', background: 'linear-gradient(to right, var(--accent-cyan), var(--accent-purple))', transition: 'width 0.2s ease' }}></div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                    <Loader2 className="animate-spin-custom" style={{ width: '14px', height: '14px', color: 'var(--accent-cyan)' }} />
+                    Running automated FFmpeg render task...
+                  </div>
                 </div>
-                {/* Progress bar */}
-                <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden', marginBottom: '12px' }}>
-                  <div style={{ width: `${taskProgress}%`, height: '100%', background: 'linear-gradient(to right, var(--accent-cyan), var(--accent-purple))', transition: 'width 0.2s ease' }}></div>
-                </div>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                  <Loader2 className="animate-spin-custom" style={{ width: '14px', height: '14px', color: 'var(--accent-cyan)' }} />
-                  Running automated FFmpeg render task...
-                </div>
-              </div>
-            ) : (
-              <button 
-                className="btn-primary"
-                disabled={!videoInfo}
-                onClick={handleGenerate}
-                style={{ width: '100%', padding: '16px', fontSize: '1.05rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}
-              >
-                <Sparkles style={{ width: '18px', height: '18px' }} />
-                Generate Slowed & Reverb Remix
-              </button>
-            )}
+              ) : (
+                <button 
+                  className="btn-primary"
+                  disabled={!videoInfo}
+                  onClick={handleGenerate}
+                  style={{ width: '100%', padding: '16px', fontSize: '1.05rem', textTransform: 'uppercase', letterSpacing: '0.05em', cursor: 'pointer' }}
+                >
+                  <Sparkles style={{ width: '18px', height: '18px' }} />
+                  Generate Slowed & Reverb Remix
+                </button>
+              );
+            })()}
           </section>
 
           {/* Audio Wave Player Deck */}

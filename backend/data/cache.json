@@ -1,6 +1,44 @@
 {
   "history": [
     {
+      "id": "proc_1779763583636",
+      "title": "009 - Mat Ja Re Rangile Fagun Rasiya ｜ मत जा रे रंगीले फागुन रसिया ｜ Shri Indresh Ji ｜ होरी विदाई को पद.mp3 (Slowed & Reverb)",
+      "fileName": "proc_1779763583636.mp3",
+      "processedAt": "2026-05-26T02:46:27.759Z",
+      "settings": {
+        "speed": 0.97,
+        "pitchStyle": "stretch",
+        "reverb": "deep",
+        "bassEQ": 10,
+        "midEQ": -3,
+        "trebleEQ": -6,
+        "tapeHiss": 0.005,
+        "muffleCutoff": 4500,
+        "stereoWidth": 1,
+        "wowFlutter": 0.65,
+        "bitDepth": 8
+      }
+    },
+    {
+      "id": "proc_1779763431224",
+      "title": "009 - Mat Ja Re Rangile Fagun Rasiya ｜ मत जा रे रंगीले फागुन रसिया ｜ Shri Indresh Ji ｜ होरी विदाई को पद.mp3 (Slowed & Reverb)",
+      "fileName": "proc_1779763431224.mp3",
+      "processedAt": "2026-05-26T02:43:55.402Z",
+      "settings": {
+        "speed": 0.97,
+        "pitchStyle": "stretch",
+        "reverb": "deep",
+        "bassEQ": 10,
+        "midEQ": -3,
+        "trebleEQ": -6,
+        "tapeHiss": 0.005,
+        "muffleCutoff": 4500,
+        "stereoWidth": 1,
+        "wowFlutter": 0.65,
+        "bitDepth": 8
+      }
+    },
+    {
       "id": "proc_1779762484440",
       "title": "009 - Mat Ja Re Rangile Fagun Rasiya ｜ मत जा रे रंगीले फागुन रसिया ｜ Shri Indresh Ji ｜ होरी विदाई को पद.mp3 (Slowed & Reverb)",
       "fileName": "proc_1779762484440.mp3",
