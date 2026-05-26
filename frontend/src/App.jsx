@@ -161,6 +161,7 @@ function App() {
   const fbGainsRef = useRef([]);
   const reverbDryGainRef = useRef(null);
   const reverbWetGainRef = useRef(null);
+  const reverbWetFilterRef = useRef(null);
   const mainGainRef = useRef(null);
   const amixMusicGainRef = useRef(null);
   const makeupGainRef = useRef(null);
@@ -378,28 +379,40 @@ function App() {
           dry: 0.8,
           wet: 0.35,
           delays: [0.06, 0.08, 0.1, 0.1, 0.1],
-          decays: [0.4, 0.3, 0.0, 0.0, 0.0]
+          decays: [0.4, 0.3, 0.0, 0.0, 0.0],
+          hfDamping: false
         };
       case 'medium':
         return {
           dry: 0.8,
           wet: 0.40,
           delays: [0.06, 0.08, 0.12, 0.1, 0.1],
-          decays: [0.4, 0.3, 0.2, 0.0, 0.0]
+          decays: [0.4, 0.3, 0.2, 0.0, 0.0],
+          hfDamping: false
         };
       case 'deep':
         return {
           dry: 0.8,
           wet: 0.45,
           delays: [0.06, 0.09, 0.15, 0.22, 0.30],
-          decays: [0.5, 0.4, 0.3, 0.2, 0.1]
+          decays: [0.5, 0.4, 0.3, 0.2, 0.1],
+          hfDamping: false
+        };
+      case 'silent_hall':
+        return {
+          dry: 0.85,
+          wet: 0.48,
+          delays: [0.07, 0.11, 0.18, 0.26, 0.35],
+          decays: [0.55, 0.45, 0.35, 0.25, 0.15],
+          hfDamping: true
         };
       default: // 'none'
         return {
           dry: 1.0,
           wet: 0.0,
           delays: [0.1, 0.1, 0.1, 0.1, 0.1],
-          decays: [0.0, 0.0, 0.0, 0.0, 0.0]
+          decays: [0.0, 0.0, 0.0, 0.0, 0.0],
+          hfDamping: false
         };
     }
   };
@@ -441,6 +454,10 @@ function App() {
       const reverbDryGain = ctx.createGain();
       const reverbWetGain = ctx.createGain();
 
+      // High-Frequency Damping filter to eliminate airy ringing/hiss
+      const reverbWetFilter = ctx.createBiquadFilter();
+      reverbWetFilter.type = 'lowpass';
+
       const delayNodes = [];
       const fbGains = [];
 
@@ -452,12 +469,14 @@ function App() {
         delayNode.connect(fbGain);
         fbGain.connect(delayNode);
 
-        // Connect fbGain to wet output
-        fbGain.connect(reverbWetGain);
+        // Connect fbGain to wet filter instead of wet output directly
+        fbGain.connect(reverbWetFilter);
 
         delayNodes.push(delayNode);
         fbGains.push(fbGain);
       }
+
+      reverbWetFilter.connect(reverbWetGain);
 
       // 5. Tape Hiss (High-fidelity Pink Noise Loop with seamless loop crossfader)
       const fadeSamples = 4000;
@@ -545,6 +564,7 @@ function App() {
       const reverbConfig = getReverbConfig(reverb);
       reverbDryGain.gain.value = reverbConfig.dry;
       reverbWetGain.gain.value = reverbConfig.wet;
+      reverbWetFilter.frequency.value = reverbConfig.hfDamping ? 1000 : 20000;
 
       for (let i = 0; i < 5; i++) {
         delayNodes[i].delayTime.value = reverbConfig.delays[i];
@@ -700,6 +720,7 @@ function App() {
       fbGainsRef.current = fbGains;
       reverbDryGainRef.current = reverbDryGain;
       reverbWetGainRef.current = reverbWetGain;
+      reverbWetFilterRef.current = reverbWetFilter;
       noiseSourceRef.current = noiseSource;
       noiseGainRef.current = noiseGain;
       mainGainRef.current = mainGain;
@@ -774,6 +795,9 @@ function App() {
       if (reverbWetGainRef.current) {
         try { reverbWetGainRef.current.disconnect(); } catch (e) {}
       }
+      if (reverbWetFilterRef.current) {
+        try { reverbWetFilterRef.current.disconnect(); } catch (e) {}
+      }
       if (mainGainRef.current) mainGainRef.current.disconnect();
       if (amixMusicGainRef.current) {
         try { amixMusicGainRef.current.disconnect(); } catch (e) {}
@@ -807,6 +831,7 @@ function App() {
     fbGainsRef.current = [];
     reverbDryGainRef.current = null;
     reverbWetGainRef.current = null;
+    reverbWetFilterRef.current = null;
     noiseSourceRef.current = null;
     noiseGainRef.current = null;
     tapeHissRef.current = null;
@@ -870,6 +895,10 @@ function App() {
       const config = getReverbConfig(reverb);
       reverbDryGainRef.current.gain.setTargetAtTime(config.dry, ctx.currentTime, 0.05);
       reverbWetGainRef.current.gain.setTargetAtTime(config.wet, ctx.currentTime, 0.05);
+      if (reverbWetFilterRef.current) {
+        const targetFreq = config.hfDamping ? 1000 : 20000;
+        reverbWetFilterRef.current.frequency.setTargetAtTime(targetFreq, ctx.currentTime, 0.05);
+      }
       for (let i = 0; i < 5; i++) {
         if (delayNodesRef.current[i]) {
           delayNodesRef.current[i].delayTime.setTargetAtTime(config.delays[i], ctx.currentTime, 0.05);
@@ -2356,8 +2385,8 @@ function App() {
                     <label style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '8px' }}>
                       Reverb Density
                     </label>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
-                      {['none', 'light', 'medium', 'deep'].map((preset) => (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(78px, 1fr))', gap: '8px' }}>
+                      {['none', 'light', 'medium', 'deep', 'silent_hall'].map((preset) => (
                         <button
                           key={preset}
                           onClick={() => { setReverb(preset); setActivePreset(null); }}
@@ -2375,7 +2404,7 @@ function App() {
                             transition: 'all 0.2s ease'
                           }}
                         >
-                          {preset}
+                          {preset === 'silent_hall' ? 'Silent Hall' : preset}
                         </button>
                       ))}
                     </div>

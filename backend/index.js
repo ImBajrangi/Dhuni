@@ -330,15 +330,9 @@ app.post('/api/process', (req, res) => {
 
   // Build FFmpeg Filter Graph
   // We'll process audio stream [0:a]
-  let filterChain = '';
+  let preReverb = '';
 
-  // 1. Trim (if set)
-  // Note: we can trim inside the filter graph using 'atrim' or using -ss -to flags.
-  // Using -ss and -to as input/output options is more efficient for FFmpeg,
-  // but if we are building a filtergraph, we can also use 'atrim' to ensure clean sync.
-  // Let's use input seek (-ss) and duration seek (-t) which are highly optimized.
-
-  // 2. Slowed (speed & pitch) with support for independent controls
+  // 1. Slowed (speed & pitch) with support for independent controls
   let pitchFactor = 1.0;
   if (pitchStyle === 'vinyl') {
     pitchFactor = speed;
@@ -347,79 +341,81 @@ app.post('/api/process', (req, res) => {
   }
 
   // Shift pitch using sample rate manipulation
-  filterChain += `asetrate=44100*${pitchFactor},aresample=44100`;
+  preReverb += `asetrate=44100*${pitchFactor},aresample=44100`;
 
   // Scale tempo to correct for the pitch shift ratio
   const tempoRatio = speed / pitchFactor;
   if (tempoRatio < 0.5) {
     // atempo filter is restricted to [0.5, 2.0] in FFmpeg; chain multiple if ratio is lower
-    filterChain += `,atempo=0.5,atempo=${tempoRatio / 0.5}`;
+    preReverb += `,atempo=0.5,atempo=${tempoRatio / 0.5}`;
   } else if (tempoRatio > 2.0) {
-    filterChain += `,atempo=2.0,atempo=${tempoRatio / 2.0}`;
+    preReverb += `,atempo=2.0,atempo=${tempoRatio / 2.0}`;
   } else if (tempoRatio !== 1.0) {
-    filterChain += `,atempo=${tempoRatio}`;
+    preReverb += `,atempo=${tempoRatio}`;
   }
 
-  // 3. Multi-band EQ
+  // 2. Multi-band EQ
   const bassVal = bassEQ !== undefined ? bassEQ : (req.body.bassBoost !== undefined ? req.body.bassBoost : 0);
   if (bassVal !== 0) {
-    filterChain += `,lowshelf=f=150:g=${bassVal}`;
+    preReverb += `,lowshelf=f=150:g=${bassVal}`;
   }
   if (midEQ !== 0) {
-    filterChain += `,equalizer=f=1000:width_type=h:width=200:g=${midEQ}`;
+    preReverb += `,equalizer=f=1000:width_type=h:width=200:g=${midEQ}`;
   }
   if (trebleEQ !== 0) {
-    filterChain += `,highshelf=f=6000:g=${trebleEQ}`;
+    preReverb += `,highshelf=f=6000:g=${trebleEQ}`;
   }
 
-  // 4. Muffle (Lowpass Cutoff)
+  // 3. Muffle (Lowpass Cutoff)
   if (muffleCutoff < 20000) {
-    filterChain += `,lowpass=f=${muffleCutoff}`;
+    preReverb += `,lowpass=f=${muffleCutoff}`;
   }
 
-  // 5. Reverb (Multi-delay simulator using aecho with conservative gains to prevent saturation clipping)
-  if (reverb !== 'none') {
-    if (reverb === 'light') {
-      filterChain += `,aecho=0.8:0.35:60|80:0.4|0.3`;
-    } else if (reverb === 'medium') {
-      filterChain += `,aecho=0.8:0.4:60|80|120:0.4|0.3|0.2`;
-    } else if (reverb === 'deep') {
-      filterChain += `,aecho=0.8:0.45:60|90|150|220|300:0.5|0.4|0.3|0.2|0.1`;
-    }
-  }
-
-  // 5.5 Stereo Width Expansion
+  // 4. Post-reverb effects
+  let postReverb = '';
   if (stereoWidth !== 1.0) {
-    filterChain += `,extrastereo=m=${stereoWidth}`;
+    postReverb += `extrastereo=m=${stereoWidth}`;
   }
-
-  // 5.6 Tape Wow & Flutter (vibrato)
   if (wowFlutter !== undefined && parseFloat(wowFlutter) > 0) {
     const wowVal = parseFloat(wowFlutter);
-    filterChain += `,vibrato=f=3.0:d=${(wowVal * 0.3).toFixed(3)}`;
+    if (postReverb) postReverb += ',';
+    postReverb += `vibrato=f=3.0:d=${(wowVal * 0.3).toFixed(3)}`;
   }
-
-  // 5.7 Vintage Resampler / Bitcrusher
   if (bitDepth !== undefined && parseInt(bitDepth) > 0) {
     const bits = parseInt(bitDepth);
-    filterChain += `,acrusher=level_in=1:level_out=1:bits=${bits}:mode=lin`;
+    if (postReverb) postReverb += ',';
+    postReverb += `acrusher=level_in=1:level_out=1:bits=${bits}:mode=lin`;
   }
 
-  // 6. Tape Hiss (anoisesrc noise mixing)
+  // 5. Build filterGraph based on Reverb Preset
+  let mainAudioChain = '';
+  if (reverb === 'silent_hall') {
+    // Dynamic split & damping path to eliminate airy/hissy reverb tails
+    const postReverbPart = postReverb ? `,${postReverb}` : '';
+    mainAudioChain = `[0:a]${preReverb}[pre_rev];[pre_rev]split=2[rdry][rwet];[rwet]aecho=1.0:0.48:70|110|180|260|350:0.55|0.45|0.35|0.25|0.15,lowpass=f=1000[rwetdamp];[rdry]volume=0.85[rdryvol];[rdryvol][rwetdamp]amix=inputs=2:duration=first[rev_out];[rev_out]${postReverbPart}`;
+  } else {
+    let combinedChain = preReverb;
+    if (reverb !== 'none') {
+      let reverbFilter = '';
+      if (reverb === 'light') reverbFilter = 'aecho=0.8:0.35:60|80:0.4|0.3';
+      else if (reverb === 'medium') reverbFilter = 'aecho=0.8:0.4:60|80|120:0.4|0.3|0.2';
+      else if (reverb === 'deep') reverbFilter = 'aecho=0.8:0.45:60|90|150|220|300:0.5|0.4|0.3|0.2|0.1';
+      combinedChain += `,${reverbFilter}`;
+    }
+    if (postReverb) {
+      combinedChain += `,${postReverb}`;
+    }
+    mainAudioChain = `[0:a]${combinedChain}`;
+  }
+
+  // 6. Tape Hiss & Peak Limiting (Brickwall Peak Limiter set at limit=0.95 matches WaveShaperNode)
   let filterGraph = '';
   const hasNoise = tapeHiss > 0;
 
   if (hasNoise) {
-    // Create complex filter graph to generate noise and mix it
-    // Input 0 is the audio file.
-    // [0:a] goes through our effect chain -> [clean]
-    // anoisesrc generates brown noise -> [noise]
-    // [clean][noise] are mixed together.
-    // Since anoisesrc goes on forever, we set amix=duration=first (or duration=shortest) to stop when the music stops.
-    // We add alimiter at the end of the mixed signal to completely prevent clipping distortion
-    filterGraph = `[0:a]${filterChain}[clean];anoisesrc=color=brown:amplitude=${tapeHiss}[noise];[clean][noise]amix=inputs=2:duration=first,alimiter=limit=0.95`;
+    filterGraph = `${mainAudioChain}[clean];anoisesrc=color=brown:amplitude=${tapeHiss}[noise];[clean][noise]amix=inputs=2:duration=first,alimiter=limit=0.95`;
   } else {
-    filterGraph = `[0:a]${filterChain},alimiter=limit=0.95`;
+    filterGraph = `${mainAudioChain},alimiter=limit=0.95`;
   }
 
   // Build FFmpeg process arguments
