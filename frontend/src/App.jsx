@@ -146,14 +146,7 @@ function App() {
   const [history, setHistory] = useState([]);
 
   // Custom Templates & Bulk Mode States
-  const [customTemplates, setCustomTemplates] = useState(() => {
-    try {
-      const saved = localStorage.getItem('lofi_templates');
-      return saved ? JSON.parse(saved) : {};
-    } catch (e) {
-      return {};
-    }
-  });
+  const [customTemplates, setCustomTemplates] = useState({});
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkQueue, setBulkQueue] = useState([]);
   const [isProcessingBulk, setIsProcessingBulk] = useState(false);
@@ -208,9 +201,10 @@ function App() {
   const finalAnalyserRef = useRef(null);
   const finalSourceNodeRef = useRef(null);
 
-  // Load history on mount
+  // Load history and templates on mount
   useEffect(() => {
     fetchHistory();
+    fetchTemplates();
   }, []);
 
   const fetchHistory = async () => {
@@ -222,6 +216,18 @@ function App() {
       }
     } catch (err) {
       console.error('Failed to fetch history:', err);
+    }
+  };
+
+  const fetchTemplates = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/templates`);
+      if (res.ok) {
+        const data = await res.json();
+        setCustomTemplates(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch templates:', err);
     }
   };
 
@@ -261,30 +267,38 @@ function App() {
   };
 
   // Custom Template Management
-  const handleSaveTemplate = () => {
+  const handleSaveTemplate = async () => {
     const name = prompt("Enter a name for your custom template:");
     if (!name || !name.trim()) return;
     const key = `custom_${Date.now()}`;
-    const newTemplates = {
-      ...customTemplates,
-      [key]: {
-        name: name.trim(),
-        speed,
-        pitchStyle,
-        pitchSemitones,
-        reverb,
-        bassEQ,
-        midEQ,
-        trebleEQ,
-        tapeHiss,
-        muffleCutoff,
-        stereoWidth,
-        wowFlutter,
-        bitDepth
-      }
+    const newTemplate = {
+      name: name.trim(),
+      speed,
+      pitchStyle,
+      pitchSemitones,
+      reverb,
+      bassEQ,
+      midEQ,
+      trebleEQ,
+      tapeHiss,
+      muffleCutoff,
+      stereoWidth,
+      wowFlutter,
+      bitDepth
     };
-    setCustomTemplates(newTemplates);
-    localStorage.setItem('lofi_templates', JSON.stringify(newTemplates));
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/templates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, template: newTemplate })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCustomTemplates(data.templates);
+      }
+    } catch (err) {
+      console.error('Failed to save template to backend:', err);
+    }
   };
 
   const applyCustomTemplate = (key) => {
@@ -305,12 +319,19 @@ function App() {
     setActivePreset(null);
   };
 
-  const deleteCustomTemplate = (key, e) => {
+  const deleteCustomTemplate = async (key, e) => {
     e.stopPropagation();
-    const newTemplates = { ...customTemplates };
-    delete newTemplates[key];
-    setCustomTemplates(newTemplates);
-    localStorage.setItem('lofi_templates', JSON.stringify(newTemplates));
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/templates/${key}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCustomTemplates(data.templates);
+      }
+    } catch (err) {
+      console.error('Failed to delete template from backend:', err);
+    }
   };
 
   // Bulk Mode Helpers & Workers
@@ -2279,8 +2300,8 @@ function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '12px' }}>
                             {item.status === 'completed' && item.outputFile && (
                               <a
-                                href={`${BACKEND_URL}/media/${item.outputFile}`}
-                                download={item.title + '.mp3'}
+                                href={`${BACKEND_URL}/api/download-file/${item.outputFile}`}
+                                download
                                 style={{
                                   display: 'flex',
                                   alignItems: 'center',
@@ -3798,8 +3819,8 @@ function App() {
                   </button>
 
                   <a 
-                    href={currentAudioUrl} 
-                    download={currentAudioTitle}
+                    href={`${BACKEND_URL}/api/download-file/${currentAudioUrl.substring(currentAudioUrl.lastIndexOf('/') + 1)}`}
+                    download
                     target="_blank"
                     rel="noreferrer"
                     className="btn-secondary"
@@ -3884,8 +3905,8 @@ function App() {
                         <Play style={{ width: '14px', height: '14px' }} />
                       </button>
                       <a 
-                        href={`${BACKEND_URL}/media/${track.fileName}`} 
-                        download={track.title}
+                        href={`${BACKEND_URL}/api/download-file/${track.fileName}`} 
+                        download
                         target="_blank"
                         rel="noreferrer"
                         className="btn-secondary"

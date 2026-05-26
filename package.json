@@ -2,11 +2,40 @@
   "name": "lofi-wave-studio-root",
   "version": "1.0.0",
   "private": true,
+  "main": "electron/main.js",
   "scripts": {
     "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend --legacy-peer-deps",
-    "dev": "npx concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\""
+    "dev": "npx concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "desktop:dev": "npx concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
+    "desktop:build": "npm run build --prefix frontend && electron-builder",
+    "desktop:build-win": "npm run build --prefix frontend && electron-builder --win",
+    "desktop:build-all": "npm run build --prefix frontend && electron-builder --win --mac"
   },
   "dependencies": {
     "concurrently": "^8.2.2"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.lofiwavestudio.app",
+    "productName": "LofiWaveStudio",
+    "files": [
+      "electron/**/*",
+      "backend/**/*",
+      "frontend/dist/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.music"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

@@ -21,6 +21,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const DOWNLOADS_DIR = path.join(DATA_DIR, 'downloads');
 const PROCESSED_DIR = path.join(DATA_DIR, 'processed');
 const CACHE_FILE = path.join(DATA_DIR, 'cache.json');
+const TEMPLATES_FILE = path.join(DATA_DIR, 'templates.json');
 
 fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
 fs.mkdirSync(PROCESSED_DIR, { recursive: true });
@@ -31,6 +32,11 @@ const upload = multer({ dest: DOWNLOADS_DIR });
 // Initialize local cache if it doesn't exist
 if (!fs.existsSync(CACHE_FILE)) {
   fs.writeFileSync(CACHE_FILE, JSON.stringify({ history: [], metadata: {} }, null, 2));
+}
+
+// Initialize templates database if it doesn't exist
+if (!fs.existsSync(TEMPLATES_FILE)) {
+  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify({}, null, 2));
 }
 
 // Read cache helper
@@ -45,6 +51,20 @@ const getCache = () => {
 // Write cache helper
 const saveCache = (data) => {
   fs.writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2));
+};
+
+// Read templates helper
+const getTemplates = () => {
+  try {
+    return JSON.parse(fs.readFileSync(TEMPLATES_FILE, 'utf8'));
+  } catch (e) {
+    return {};
+  }
+};
+
+// Write templates helper
+const saveTemplates = (data) => {
+  fs.writeFileSync(TEMPLATES_FILE, JSON.stringify(data, null, 2));
 };
 
 // Active task progress store (SSE connections)
@@ -690,6 +710,61 @@ app.post('/api/separate', (req, res) => {
   };
 
   runSeparation();
+});
+
+// GET /api/templates: Retrieve saved templates
+app.get('/api/templates', (req, res) => {
+  res.json(getTemplates());
+});
+
+// POST /api/templates: Save/update a custom template
+app.post('/api/templates', (req, res) => {
+  const { key, template } = req.body;
+  if (!key || !template) {
+    return res.status(400).json({ error: 'Key and template payload are required' });
+  }
+  const templates = getTemplates();
+  templates[key] = template;
+  saveTemplates(templates);
+  res.json({ success: true, templates });
+});
+
+// DELETE /api/templates/:key: Remove a custom template
+app.delete('/api/templates/:key', (req, res) => {
+  const { key } = req.params;
+  const templates = getTemplates();
+  if (!templates[key]) {
+    return res.status(404).json({ error: 'Template key not found' });
+  }
+  delete templates[key];
+  saveTemplates(templates);
+  res.json({ success: true, templates });
+});
+
+// GET /api/download-file/:fileName: Explicit attachment file download (forces 'Save As' browser dialog)
+app.get('/api/download-file/:fileName', (req, res) => {
+  const { fileName } = req.params;
+  const filePath = path.join(PROCESSED_DIR, fileName);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  // Retrieve original title from cache history to give the downloaded file a clean name
+  const cache = getCache();
+  const item = cache.history.find(h => h.fileName === fileName);
+  let cleanName = item ? item.title : fileName;
+  
+  // Sanitize file name for response headers
+  cleanName = cleanName.replace(/[^\w\s.-]/gi, '_');
+  if (!cleanName.toLowerCase().endsWith('.mp3') && !cleanName.toLowerCase().endsWith('.wav')) {
+    const ext = path.extname(fileName) || '.mp3';
+    cleanName += ext;
+  }
+
+  res.download(filePath, cleanName, (err) => {
+    if (err) {
+      console.error('[Download File] Error sending file:', err);
+    }
+  });
 });
 
 // Start backend server
