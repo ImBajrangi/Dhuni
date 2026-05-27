@@ -1,0 +1,17 @@
+{
+  "custom_1779792870685": {
+    "name": "Temp",
+    "speed": 0.97,
+    "pitchStyle": "stretch",
+    "pitchSemitones": 1,
+    "reverb": "deep",
+    "bassEQ": 10,
+    "midEQ": -2,
+    "trebleEQ": -7,
+    "tapeHiss": 2,
+    "muffleCutoff": 4500,
+    "stereoWidth": 1,
+    "wowFlutter": 0.65,
+    "bitDepth": 8
+  }
+}

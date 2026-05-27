@@ -336,8 +336,26 @@ app.post('/api/process', (req, res) => {
 
   const taskId = `proc_${Date.now()}`;
   const ext = exportFormat === 'wav' ? 'wav' : 'mp3';
-  const outFileName = `${taskId}.${ext}`;
-  const outPath = path.join(PROCESSED_DIR, outFileName);
+  
+  // Use input title/filename as base output name
+  const rawBaseName = title || sourceFile || 'Audio';
+  let baseName = path.parse(rawBaseName).name;
+  baseName = baseName.replace(/[\\/:*?"<>|]/g, '_').trim();
+  if (!baseName) {
+    baseName = 'Audio';
+  }
+
+  // Check if file already exists in PROCESSED_DIR. If so, increment numbers in front.
+  let outFileName = `${baseName}.${ext}`;
+  let outPath = path.join(PROCESSED_DIR, outFileName);
+  if (fs.existsSync(outPath)) {
+    let counter = 1;
+    while (fs.existsSync(path.join(PROCESSED_DIR, `${counter}_${baseName}.${ext}`))) {
+      counter++;
+    }
+    outFileName = `${counter}_${baseName}.${ext}`;
+    outPath = path.join(PROCESSED_DIR, outFileName);
+  }
 
   activeTasks.set(taskId, { status: 'processing', progress: 0 });
   res.json({ taskId, status: 'processing' });
@@ -562,7 +580,7 @@ app.post('/api/process', (req, res) => {
 
 // POST /api/separate: Isolate vocals and instrumentals
 app.post('/api/separate', (req, res) => {
-  const { sourceFile, method = 'dsp' } = req.body;
+  const { sourceFile, title, method = 'dsp' } = req.body;
 
   if (!sourceFile) {
     return res.status(400).json({ error: 'sourceFile is required' });
@@ -574,10 +592,34 @@ app.post('/api/separate', (req, res) => {
   }
 
   const taskId = `sep_${Date.now()}`;
-  const outVocName = `${taskId}_vocals.mp3`;
-  const outInstName = `${taskId}_instrumental.mp3`;
-  const outVocPath = path.join(PROCESSED_DIR, outVocName);
-  const outInstPath = path.join(PROCESSED_DIR, outInstName);
+  
+  // Use input title/filename as base output name
+  const rawBaseName = title || sourceFile || 'Audio';
+  let baseName = path.parse(rawBaseName).name;
+  baseName = baseName.replace(/[\\/:*?"<>|]/g, '_').trim();
+  if (!baseName) {
+    baseName = 'Audio';
+  }
+
+  // Find unique filenames for vocals and instrumental, incrementing in front if already exists
+  let outVocName = `${baseName}_vocals.mp3`;
+  let outInstName = `${baseName}_instrumental.mp3`;
+  let outVocPath = path.join(PROCESSED_DIR, outVocName);
+  let outInstPath = path.join(PROCESSED_DIR, outInstName);
+
+  if (fs.existsSync(outVocPath) || fs.existsSync(outInstPath)) {
+    let counter = 1;
+    while (true) {
+      outVocName = `${counter}_${baseName}_vocals.mp3`;
+      outInstName = `${counter}_${baseName}_instrumental.mp3`;
+      outVocPath = path.join(PROCESSED_DIR, outVocName);
+      outInstPath = path.join(PROCESSED_DIR, outInstName);
+      if (!fs.existsSync(outVocPath) && !fs.existsSync(outInstPath)) {
+        break;
+      }
+      counter++;
+    }
+  }
 
   activeTasks.set(taskId, { status: 'processing', progress: 0 });
   res.json({ taskId, status: 'processing' });
@@ -748,19 +790,9 @@ app.get('/api/download-file/:fileName', (req, res) => {
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'File not found' });
   }
-  // Retrieve original title from cache history to give the downloaded file a clean name
-  const cache = getCache();
-  const item = cache.history.find(h => h.fileName === fileName);
-  let cleanName = item ? item.title : fileName;
-  
-  // Sanitize file name for response headers
-  cleanName = cleanName.replace(/[^\w\s.-]/gi, '_');
-  if (!cleanName.toLowerCase().endsWith('.mp3') && !cleanName.toLowerCase().endsWith('.wav')) {
-    const ext = path.extname(fileName) || '.mp3';
-    cleanName += ext;
-  }
 
-  res.download(filePath, cleanName, (err) => {
+  // Use the fileName directly so the user gets the exact same file name as on disk (e.g. MySong.mp3 or 1_MySong.mp3)
+  res.download(filePath, fileName, (err) => {
     if (err) {
       console.error('[Download File] Error sending file:', err);
     }

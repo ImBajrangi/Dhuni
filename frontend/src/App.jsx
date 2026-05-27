@@ -1931,6 +1931,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sourceFile,
+          title: videoInfo.title,
           method: separateMethod
         })
       });
