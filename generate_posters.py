@@ -326,9 +326,17 @@ def main():
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         target_dir = sys.argv[1]
         print(f"Scanning target directory: {target_dir}")
-        audio_extensions = ('.mp3', '.wav', '.m4a', '.ogg', '.flac')
+        media_extensions = (
+            # Audio formats
+            '.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.wma',
+            # Video formats
+            '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv'
+        )
         try:
-            files = [f for f in os.listdir(target_dir) if f.lower().endswith(audio_extensions)]
+            files = [
+                f for f in os.listdir(target_dir) 
+                if os.path.isfile(os.path.join(target_dir, f)) and f.lower().endswith(media_extensions)
+            ]
             for file in sorted(files):
                 clean_name = clean_topic_from_filename(file)
                 if clean_name:
